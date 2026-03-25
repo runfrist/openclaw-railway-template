@@ -1,14 +1,16 @@
 #!/bin/bash
 set -e
 
-chown -R openclaw:openclaw /data
-chmod 700 /data
+DATA_DIR="${DATA_DIR:-/data}"
 
-if [ ! -d /data/.linuxbrew ]; then
-  cp -a /home/linuxbrew/.linuxbrew /data/.linuxbrew
+chown -R openclaw:openclaw "$DATA_DIR"
+chmod 700 "$DATA_DIR"
+
+if [ ! -d "$DATA_DIR/.linuxbrew" ]; then
+  cp -a /home/linuxbrew/.linuxbrew "$DATA_DIR/.linuxbrew"
 fi
 
 rm -rf /home/linuxbrew/.linuxbrew
-ln -sfn /data/.linuxbrew /home/linuxbrew/.linuxbrew
+ln -sfn "$DATA_DIR/.linuxbrew" /home/linuxbrew/.linuxbrew
 
 exec gosu openclaw node src/server.js

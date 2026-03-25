@@ -1,0 +1,23 @@
+version: v2
+name: openclaw-larry
+
+build:
+  method: docker
+  context: .
+  dockerfile: ./Dockerfile
+
+services:
+  - name: web
+    type: web
+    port: 8080
+    cpuCores: 0.5
+    ramMegabytes: 1024
+    instances: 1
+    healthCheck:
+      httpPath: /setup/healthz
+      timeoutSeconds: 5
+      initialDelaySeconds: 30
+
+envGroups:
+  - openclaw-larry-secrets
+  - openclaw-larry-config
