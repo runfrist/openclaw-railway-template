@@ -31,7 +31,11 @@ COPY src ./src
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod 755 entrypoint.sh
 
-RUN useradd -m -s /bin/bash openclaw \
+ARG OPENCLAW_UID=50000
+ARG OPENCLAW_GID=50000
+
+RUN groupadd -g ${OPENCLAW_GID} openclaw \
+  && useradd -u ${OPENCLAW_UID} -g ${OPENCLAW_GID} -m -s /bin/bash openclaw \
   && chown -R openclaw:openclaw /app \
   && mkdir -p /data && chown openclaw:openclaw /data \
   && mkdir -p /home/linuxbrew/.linuxbrew && chown -R openclaw:openclaw /home/linuxbrew
