@@ -1,4 +1,4 @@
-FROM node:22-bookworm
+FROM node:26-bookworm
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -8,16 +8,24 @@ RUN apt-get update \
     gosu \
     procps \
     python3 \
+    tini \
     build-essential \
     zip \
+    unzip \
   && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g openclaw@2026.3.23 clawhub@latest
+RUN npm install -g \
+    --allow-scripts=openclaw \
+    openclaw@2026.11.8 \
+  && node --version | grep -Eq '^v26\.' \
+  && openclaw --version | grep -Eq '^OpenClaw 2026\.11\.8( |$)'
+RUN npm install -g clawhub@latest
 
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile --prod
+RUN npm install -g pnpm@11.24.0 \
+  && pnpm install --frozen-lockfile --prod
 
 COPY src ./src
 COPY entrypoint.sh ./entrypoint.sh
@@ -38,10 +46,11 @@ ENV HOMEBREW_REPOSITORY="/home/linuxbrew/.linuxbrew/Homebrew"
 
 ENV PORT=8080
 ENV OPENCLAW_ENTRY=/usr/local/lib/node_modules/openclaw/dist/entry.js
+ENV OPENCLAW_SUPERVISOR_MODE=external
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
   CMD curl -f http://localhost:8080/setup/healthz || exit 1
 
 USER root
-ENTRYPOINT ["./entrypoint.sh"]
+ENTRYPOINT ["tini", "--", "./entrypoint.sh"]

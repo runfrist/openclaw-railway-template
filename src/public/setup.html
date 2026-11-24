@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>🦞 OpenClaw — Personal AI Assistant</title>
   <link rel="stylesheet" href="/styles.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script>
   document.addEventListener('alpine:init', () => {
     Alpine.data('setupApp', () => ({
@@ -21,20 +18,33 @@
       authChoices: [],
       selectedAuth: '',
       authSecret: '',
+      customBaseUrl: '',
+      customModelId: '',
+      customCompatibility: 'openai',
+      cloudflareAccountId: '',
+      cloudflareGatewayId: '',
       telegramToken: '',
       discordToken: '',
       slackBotToken: '',
       slackAppToken: '',
       model: '',
       log: '',
+      setupError: '',
+      setupStreamTail: '',
       loading: false,
       pairingChannel: '',
       pairingCode: '',
+      pairingSubmitting: false,
+      pairingResult: '',
+      pairingMessage: '',
       showPairingModal: false,
       isReady: false,
-      tuiEnabled: false,
       exporting: false,
       showExportInfo: false,
+      importing: false,
+      showImportModal: false,
+      pendingImportFile: null,
+      importArchivePassword: '',
       showDevicesModal: false,
       devicesLoading: false,
       devices: [],
@@ -43,6 +53,34 @@
 
       get currentGroup() {
         return this.authGroups.find(g => g.value === this.selectedGroup);
+      },
+
+      get authRequiresSecret() {
+        return ![
+          'openai-device-code',
+          'xai-device-code',
+          'github-copilot',
+          'ollama',
+          'vllm',
+          'sglang'
+        ].includes(this.selectedAuth);
+      },
+
+      get isDeviceCode() {
+        return [
+          'openai-device-code',
+          'xai-device-code'
+        ].includes(this.selectedAuth);
+      },
+
+      get authGuidance() {
+        if (this.isDeviceCode) {
+          return 'This login uses an interactive device-code flow that the web setup can\'t run. Open the Railway console and run `openclaw wizard` to complete it, then return here.';
+        }
+        if (!this.authRequiresSecret) {
+          return 'No API key is needed for this auth method.';
+        }
+        return '';
       },
 
       async init() {
@@ -65,15 +103,11 @@
           const j = await this.httpJson('/setup/api/status');
           this.configured = j.configured;
           this.openclawVersion = j.openclawVersion || '';
-          this.tuiEnabled = j.tuiEnabled || false;
           this.status = j.configured ? 'Configured - open /openclaw' : 'Not configured - run setup below';
           this.authGroups = j.authGroups || [];
           if (this.authGroups.length > 0) {
             this.selectedGroup = this.authGroups[0].value;
             this.updateAuthChoices();
-          }
-          if (j.channelsAddHelp && j.channelsAddHelp.indexOf('telegram') === -1) {
-            this.log += '\nNote: this openclaw build does not list telegram in `channels add --help`. Telegram auto-add will be skipped.\n';
           }
           this.isReady = true;
         } catch (e) {
@@ -99,10 +133,21 @@
       },
 
       async runSetup() {
+        if (this.isDeviceCode) {
+          this.setupError = 'This login must be completed from the Railway console with `openclaw wizard`.';
+          return;
+        }
+        this.setupError = '';
+        this.setupStreamTail = '';
         const payload = {
           authChoice: this.selectedAuth,
           authSecret: this.authSecret,
           model: this.model,
+          customBaseUrl: this.customBaseUrl,
+          customModelId: this.customModelId,
+          customCompatibility: this.customCompatibility,
+          cloudflareAccountId: this.cloudflareAccountId,
+          cloudflareGatewayId: this.cloudflareGatewayId,
           telegramToken: this.telegramToken,
           discordToken: this.discordToken,
           slackBotToken: this.slackBotToken,
@@ -119,36 +164,76 @@
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(payload)
           });
-          const text = await res.text();
-          let j;
-          try { j = JSON.parse(text); } catch (_e) { j = { ok: false, output: text }; }
-          this.log += (j.output || JSON.stringify(j, null, 2));
+          if (res.body) {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              this.processSetupChunk(decoder.decode(value, { stream: true }));
+              this.$nextTick(() => {
+                const el = this.$refs.setupLog;
+                if (el) el.scrollTop = el.scrollHeight;
+              });
+            }
+            this.processSetupChunk(decoder.decode());
+          } else {
+            this.processSetupChunk(await res.text());
+          }
+          if (!res.ok && !this.setupError) {
+            this.setupError = 'Setup request failed with HTTP ' + res.status + '.';
+          }
           await this.refreshStatus();
         } catch (e) {
-          this.log += '\nError: ' + String(e) + '\n';
+          this.setupError = 'Setup request failed.';
+          this.processSetupChunk('\nError: ' + String(e) + '\n');
         } finally {
           this.loading = false;
+        }
+      },
+
+      processSetupChunk(chunk) {
+        if (!chunk) return;
+        this.log += chunk;
+        const scanText = this.setupStreamTail + chunk;
+        this.setupStreamTail = scanText.slice(-1000);
+        this.extractSetupFailure(scanText);
+      },
+
+      extractSetupFailure(text) {
+        if (text.includes('[setup] Internal error')) {
+          this.setupError = 'Setup hit an internal error. Review the log below.';
+        } else if (text.includes('[setup] Failed')) {
+          this.setupError = 'Setup failed. Review the log below.';
         }
       },
 
       openPairingModal() {
         this.pairingChannel = '';
         this.pairingCode = '';
+        this.pairingSubmitting = false;
+        this.pairingResult = '';
+        this.pairingMessage = '';
         this.showPairingModal = true;
       },
 
       async approvePairing() {
+        if (this.pairingSubmitting) return;
         const channel = this.pairingChannel.trim().toLowerCase();
         if (channel !== 'telegram' && channel !== 'discord') {
-          alert('Channel must be "telegram" or "discord"');
+          this.pairingResult = 'error';
+          this.pairingMessage = 'Choose Telegram or Discord before approving.';
           return;
         }
         const code = this.pairingCode.trim();
         if (!code) {
-          alert('Please enter a pairing code');
+          this.pairingResult = 'error';
+          this.pairingMessage = 'Enter the pairing code from the channel message.';
           return;
         }
-        this.showPairingModal = false;
+        this.pairingSubmitting = true;
+        this.pairingResult = 'pending';
+        this.pairingMessage = 'Approving channel access...';
         this.log += '\nApproving pairing for ' + channel + '...\n';
 
         try {
@@ -162,17 +247,21 @@
           let result;
           try { result = JSON.parse(t); } catch (_e) { result = { ok: false, output: t }; }
           if (result.ok) {
-            const msg = result.output || 'Pairing approved successfully';
-            this.log += '✓ ' + msg + '\n';
-            alert('✓ ' + msg.trim());
+            this.pairingResult = 'success';
+            this.pairingMessage = result.message || 'Channel access approved.';
+            this.log += '✓ ' + this.pairingMessage + '\n';
           } else {
-            const msg = result.output || result.error || 'Unknown error';
-            this.log += '✗ Failed: ' + msg + '\n';
-            alert('✗ Pairing failed: ' + msg.trim());
+            this.pairingResult = 'error';
+            this.pairingMessage = result.message || result.error || 'Channel approval failed.';
+            this.log += '✗ Pairing failed: ' + this.pairingMessage + '\n';
           }
+          if (result.output) this.log += result.output.trim() + '\n';
         } catch (e) {
+          this.pairingResult = 'error';
+          this.pairingMessage = 'Channel approval request failed. Check your connection and try again.';
           this.log += '✗ Error: ' + String(e) + '\n';
-          alert('✗ Pairing failed: ' + String(e));
+        } finally {
+          this.pairingSubmitting = false;
         }
       },
 
@@ -253,6 +342,63 @@
           this.log += '✗ Export error: ' + String(e) + '\n';
         } finally {
           this.exporting = false;
+        }
+      },
+
+      onImportFileSelected(event) {
+        const f = event.target.files && event.target.files[0];
+        event.target.value = '';
+        if (!f) return;
+        this.pendingImportFile = f;
+        this.importArchivePassword = '';
+        this.showImportModal = true;
+      },
+
+      cancelImport() {
+        if (this.importing) return;
+        this.showImportModal = false;
+        this.pendingImportFile = null;
+        this.importArchivePassword = '';
+      },
+
+      async confirmImport() {
+        const f = this.pendingImportFile;
+        if (!f) return;
+
+        const headers = { 'content-type': 'application/zip' };
+        const pw = (this.importArchivePassword || '').trim();
+        if (pw) {
+          headers['x-archive-password'] = btoa(unescape(encodeURIComponent(pw)));
+        }
+
+        this.importing = true;
+        this.log = 'Uploading ' + f.name + ' (' + f.size + ' bytes)...\n';
+
+        try {
+          const buf = await f.arrayBuffer();
+          const res = await fetch('/setup/api/import', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers,
+            body: buf,
+          });
+          const text = await res.text();
+          let j;
+          try { j = JSON.parse(text); } catch (_e) { j = { ok: res.ok, output: text }; }
+          if (j.output) this.log += j.output + '\n';
+          if (res.ok && j.ok) {
+            this.log += '✓ Import complete. Gateway restarted.\n';
+            this.showImportModal = false;
+            this.pendingImportFile = null;
+            this.importArchivePassword = '';
+            await this.refreshStatus();
+          } else {
+            this.log += '✗ Import failed: ' + (j.error || text) + '\n';
+          }
+        } catch (e) {
+          this.log += '✗ Import error: ' + String(e) + '\n';
+        } finally {
+          this.importing = false;
         }
       },
 
@@ -338,10 +484,7 @@
 <body x-data="setupApp()">
   <div class="container">
     <div class="logo-wrap">
-      <picture>
-        <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-logo-text-dark.png">
-        <img src="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-logo-text.png" alt="OpenClaw" class="logo-img">
-      </picture>
+      <span class="logo-text">OpenClaw 🦞</span>
     </div>
     <div style="margin-bottom:1.5rem;padding:0.75rem 1rem;border:1px solid #ef4444;border-radius:0.5rem;background:var(--bg-card)">
       <p style="font-size:0.75rem;color:var(--text-mid);line-height:1.5;margin:0">
@@ -362,10 +505,6 @@
         <a href="/openclaw" target="_blank" class="inline-link link-teal">
           Open OpenClaw UI
           <svg class="icon-link" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-        </a>
-        <a x-show="tuiEnabled" href="/tui" target="_blank" class="inline-link link-purple">
-          Open Terminal
-          <svg class="icon-link" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
         </a>
       </div>
     </div>
@@ -446,6 +585,24 @@
             </button>
           </div>
 
+          <div class="action-card action-violet">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+              </div>
+              <span class="action-title">Import Data</span>
+            </div>
+            <p class="action-desc">Restore from a password-protected ZIP. Overwrites config and workspace, then restarts the gateway.</p>
+            <input x-ref="importInput" @change="onImportFileSelected($event)" type="file" accept=".zip,application/zip" style="display:none" />
+            <button @click="$refs.importInput.click()" :disabled="loading || importing || exporting" class="action-btn">
+              <span x-show="!importing">Import Data</span>
+              <span x-show="importing" style="display:inline-flex;align-items:center;justify-content:center;gap:0.5rem">
+                <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Importing...
+              </span>
+            </button>
+          </div>
+
           <div class="action-card action-blue">
             <div class="action-card-header">
               <div class="action-icon">
@@ -456,6 +613,19 @@
             <p class="action-desc">Stream server logs in real-time for debugging and monitoring.</p>
             <a href="/logs" target="_blank" class="action-btn" style="display:block;text-align:center;text-decoration:none">
               View Logs
+            </a>
+          </div>
+
+          <div class="action-card action-violet">
+            <div class="action-card-header">
+              <div class="action-icon">
+                <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+              </div>
+              <span class="action-title">Edit Config</span>
+            </div>
+            <p class="action-desc">Directly edit <code>openclaw.json</code>. Creates a backup and restarts the gateway on save.</p>
+            <a href="/setup/config" class="action-btn" style="display:block;text-align:center;text-decoration:none">
+              Edit Config
             </a>
           </div>
         </div>
@@ -479,6 +649,26 @@
     </div>
 
     <div x-show="isReady && !configured" x-cloak>
+      <div class="console-card mb-6">
+        <div class="console-card-header">
+          <div class="console-icon">
+            <svg class="icon-md" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          </div>
+          <h3 class="card-title" style="font-size:1rem;margin-bottom:0">Prefer the command line?</h3>
+        </div>
+        <p class="console-card-desc">
+          This wizard is just one way to get started. You can also run any <code>openclaw</code> command directly using
+          Railway's built-in <strong>Console</strong> — an in-browser shell scoped to this service, no SSH client needed.
+        </p>
+        <ol class="console-steps">
+          <li>Open your project in the <strong>Railway dashboard</strong></li>
+          <li>Click this <strong>service</strong>, then open the <strong>Console</strong> tab</li>
+          <li>Use the connected shell (top) and file browser (bottom) to run commands, e.g.:</li>
+        </ol>
+        <pre class="console-cmd"><code>openclaw onboard
+openclaw models set anthropic/claude-sonnet-4-20250514</code></pre>
+      </div>
+
       <div class="steps">
         <template x-for="s in totalSteps" :key="s">
           <div class="step-item">
@@ -514,16 +704,50 @@
                 <option :value="o.value" x-text="o.label + (o.hint ? ' — ' + o.hint : '')"></option>
               </template>
             </select>
+            <p x-show="authGuidance" class="form-hint" x-text="authGuidance"></p>
           </div>
 
-          <div class="form-group">
+          <div class="form-group" x-show="authRequiresSecret">
             <label class="label">API Key / Token</label>
             <input x-model="authSecret" type="password" placeholder="Paste your API key or token" class="input" />
           </div>
 
+          <template x-if="selectedAuth === 'custom-api-key'">
+            <div>
+              <div class="form-group">
+                <label class="label">Base URL</label>
+                <input x-model="customBaseUrl" type="text" placeholder="e.g. https://api.example.com/v1" class="input" />
+              </div>
+              <div class="form-group">
+                <label class="label">Model ID</label>
+                <input x-model="customModelId" type="text" placeholder="e.g. my-model-id" class="input" />
+              </div>
+              <div class="form-group">
+                <label class="label">API Compatibility</label>
+                <select x-model="customCompatibility" class="select">
+                  <option value="openai">OpenAI-compatible</option>
+                  <option value="anthropic">Anthropic-compatible</option>
+                </select>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="selectedAuth === 'cloudflare-ai-gateway-api-key'">
+            <div>
+              <div class="form-group">
+                <label class="label">Account ID</label>
+                <input x-model="cloudflareAccountId" type="text" placeholder="Cloudflare Account ID" class="input" />
+              </div>
+              <div class="form-group">
+                <label class="label">Gateway ID</label>
+                <input x-model="cloudflareGatewayId" type="text" placeholder="Cloudflare AI Gateway ID" class="input" />
+              </div>
+            </div>
+          </template>
+
           <div class="form-group">
             <label class="label">Model</label>
-            <input x-model="model" type="text" placeholder="e.g. openai/gpt-4.1, anthropic/claude-sonnet-4" class="input" />
+            <input x-model="model" type="text" placeholder="e.g. xai/grok-4.3, openai/gpt-4.1, anthropic/claude-opus-4-8" class="input" />
             <p class="form-hint">Format: provider/model-name</p>
           </div>
         </div>
@@ -607,8 +831,14 @@
             </dl>
           </div>
 
+          <div x-show="isDeviceCode" class="setup-error-panel">
+            This login uses an interactive device-code flow that the web setup can't run.
+            Open the Railway console and run <code class="code-inline">openclaw wizard</code> to
+            complete it, then return here. Pick a different auth method to continue in the wizard.
+          </div>
+
           <div class="btn-row">
-            <button @click="runSetup()" :disabled="loading" class="btn btn-primary">
+            <button @click="runSetup()" :disabled="loading || isDeviceCode" class="btn btn-primary">
               <span x-show="!loading">Run Setup</span>
               <span x-show="loading" style="display:inline-flex;align-items:center;gap:0.5rem">
                 <svg class="spinner-inline" fill="none" viewBox="0 0 24 24"><circle style="opacity:0.25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path style="opacity:0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
@@ -620,7 +850,9 @@
             </button>
           </div>
 
-          <div x-show="log" class="log-output" x-text="log"></div>
+          <div x-show="setupError" class="setup-error-panel" x-text="setupError"></div>
+
+          <div x-show="log" x-ref="setupLog" class="log-output" x-text="log"></div>
 
           <p class="text-xs text-muted mt-4">Reset deletes the config file so you can rerun onboarding. Channel access approval grants DM access when dmPolicy=pairing.</p>
         </div>
@@ -730,12 +962,45 @@
       </div>
     </div>
 
-    <div x-show="showPairingModal" x-cloak class="modal-overlay" @click.self="showPairingModal = false">
+    <div x-show="showImportModal" x-cloak class="modal-overlay" @click.self="cancelImport()">
+      <div class="modal-card modal-md">
+        <h3 class="modal-title mb-4">Import Backup</h3>
+        <p class="text-sm text-muted mb-4">
+          Restoring <strong x-text="pendingImportFile?.name"></strong>
+          (<span x-text="pendingImportFile ? Math.round(pendingImportFile.size / 1024) + ' KB' : ''"></span>).
+          This overwrites your config and workspace under <code>/data</code>, then restarts the gateway.
+        </p>
+        <div class="form-group">
+          <label class="label">Archive password</label>
+          <input
+            x-model="importArchivePassword"
+            type="password"
+            autocomplete="off"
+            placeholder="Leave blank to use this instance's SETUP_PASSWORD"
+            :disabled="importing"
+            class="input"
+          />
+          <p class="text-sm text-muted" style="margin-top:0.25rem">Use the SETUP_PASSWORD of the instance the backup was exported from. Leave blank if it was this instance.</p>
+        </div>
+        <div class="btn-pair">
+          <button @click="confirmImport()" :disabled="importing" class="btn btn-primary">
+            <span x-show="!importing">Import &amp; Restart</span>
+            <span x-show="importing" style="display:inline-flex;align-items:center;gap:0.5rem">
+              <span class="spinner spinner-inline" aria-hidden="true"></span>
+              Importing
+            </span>
+          </button>
+          <button @click="cancelImport()" :disabled="importing" class="btn btn-close-full" style="margin-top:0">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div x-show="showPairingModal" x-cloak class="modal-overlay" @click.self="if (!pairingSubmitting) showPairingModal = false">
       <div class="modal-card modal-sm">
         <h3 class="modal-title mb-4">Approve Channel Access</h3>
         <div class="form-group">
           <label class="label">Channel</label>
-          <select x-model="pairingChannel" class="select">
+          <select x-model="pairingChannel" @change="pairingResult = ''; pairingMessage = ''" :disabled="pairingSubmitting" class="select">
             <option value="">Select channel...</option>
             <option value="telegram">Telegram</option>
             <option value="discord">Discord</option>
@@ -743,11 +1008,21 @@
         </div>
         <div class="form-group">
           <label class="label">Pairing Code</label>
-          <input x-model="pairingCode" type="text" placeholder="e.g. 3EY4PUYS" class="input" />
+          <input x-model="pairingCode" @input="pairingResult = ''; pairingMessage = ''" :disabled="pairingSubmitting" type="text" placeholder="e.g. 3EY4PUYS" class="input" />
+        </div>
+        <div x-show="pairingResult" x-cloak role="status" aria-live="polite" class="pairing-status" :class="'pairing-status-' + pairingResult">
+          <span x-show="pairingResult === 'pending'" class="spinner spinner-inline" aria-hidden="true"></span>
+          <span x-text="pairingMessage"></span>
         </div>
         <div class="btn-pair">
-          <button @click="approvePairing()" class="btn btn-primary">Approve</button>
-          <button @click="showPairingModal = false" class="btn btn-close-full" style="margin-top:0">Cancel</button>
+          <button @click="approvePairing()" :disabled="pairingSubmitting || pairingResult === 'success'" class="btn btn-primary">
+            <span x-show="!pairingSubmitting">Approve</span>
+            <span x-show="pairingSubmitting" style="display:inline-flex;align-items:center;gap:0.5rem">
+              <span class="spinner spinner-inline" aria-hidden="true"></span>
+              Approving
+            </span>
+          </button>
+          <button @click="showPairingModal = false" :disabled="pairingSubmitting" class="btn btn-close-full" style="margin-top:0" x-text="pairingResult === 'success' ? 'Close' : 'Cancel'"></button>
         </div>
       </div>
     </div>
