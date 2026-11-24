@@ -106,9 +106,9 @@ When the user runs setup (src/server.js:522-693):
 
 1. Calls `openclaw onboard --non-interactive` with user-selected auth provider
 2. Writes channel configs (Telegram/Discord/Slack) directly to `openclaw.json` via `openclaw config set --json`
-3. Force-sets gateway config to use token auth + loopback bind + allowInsecureAuth
+3. Force-sets gateway config to use token auth + loopback bind + trusted proxy/origin settings
 4. Spawns gateway process
-5. Waits for gateway readiness (polls multiple endpoints)
+5. Waits for gateway traffic admission at `/startupz`
 
 **Important**: Channel setup bypasses `openclaw channels add` and writes config directly because `channels add` is flaky across different OpenClaw builds.
 
@@ -121,7 +121,7 @@ The wrapper **always** injects the bearer token into proxied requests so browser
 
 **Important**: Token injection uses `http-proxy` event handlers (`proxyReq` and `proxyReqWs`) rather than direct `req.headers` modification. Direct header modification does not reliably work with WebSocket upgrades, causing intermittent `token_missing` or `token_mismatch` errors.
 
-This allows the Control UI at `/openclaw` to work without user authentication.
+This lets the Control UI at `/openclaw` authenticate through the wrapper. New browser devices still require one-time approval from the password-protected setup page.
 
 ## Common Development Tasks
 
@@ -163,7 +163,7 @@ Edit `buildOnboardArgs()` (src/server.js:442-496) to add new CLI flags or auth p
 - Template must mount a volume at `/data`
 - Must set `SETUP_PASSWORD` in Railway Variables
 - Public networking must be enabled (assigns `*.up.railway.app` domain)
-- OpenClaw is installed via `npm install -g openclaw@latest` during Docker build
+- OpenClaw is installed via `npm install -g openclaw@2026.11.6` during Docker build (the pinned version lives in `Dockerfile`)
 
 ## Serena Semantic Coding
 
@@ -190,8 +190,10 @@ This avoids repeatedly reading large files and provides instant context about th
 
 1. **Gateway token must be stable across redeploys** → persisted to volume if not in env
 2. **Channels are written via `config set --json`, not `channels add`** → avoids CLI version incompatibilities
-3. **Gateway readiness check polls multiple endpoints** (`/openclaw`, `/`, `/health`) → some builds only expose certain routes (src/server.js:92)
+3. **Gateway traffic admission uses `/startupz`** → this keeps the UI available when a channel-specific `/readyz` check is unhealthy
 4. **Discord bots require MESSAGE CONTENT INTENT** → document this in setup wizard (src/server.js:295-298)
 5. **Gateway spawn inherits stdio** → logs appear in wrapper output (src/server.js:134)
 6. **WebSocket auth requires proxy event handlers** → Direct `req.headers` modification doesn't work for WebSocket upgrades with http-proxy; must use `proxyReqWs` event (src/server.js:741) to reliably inject Authorization header
-7. **Control UI requires allowInsecureAuth to bypass pairing** → Set `gateway.controlUi.allowInsecureAuth=true` during onboarding to prevent "disconnected (1008): pairing required" errors (GitHub issue #2284). Wrapper already handles bearer token auth, so device pairing is unnecessary.
+7. **Control UI devices require pairing** → `gateway.controlUi.allowInsecureAuth` was retired in OpenClaw 2026.8.1. Approve new browser devices from the password-protected `/setup` page.
+8. **The wrapper is the external supervisor** → `OPENCLAW_SUPERVISOR_MODE=external` prevents OpenClaw service commands and self-updates from competing with Railway and the wrapper's direct child-process lifecycle.
+9. **Config Editor (`/setup/config`) writes `openclaw.json` directly** → unlike onboarding (which uses `openclaw config set --json`), the editor parses+validates JSON, makes a `.bak-<timestamp>` copy, then `fs.writeFileSync`s the new contents and calls `restartGateway()`. This is intentional: it's an operator-targeted advanced tool, so direct writes are simpler and let users fix arbitrarily-broken config without depending on the CLI.

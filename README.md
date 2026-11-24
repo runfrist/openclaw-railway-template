@@ -10,17 +10,26 @@
 
 - **OpenClaw Gateway + Control UI** (served at `/` and `/openclaw`)
 - A friendly **Setup Wizard** at `/setup` (protected by a password)
-- Optional **Web Terminal** at `/tui` for browser-based TUI access
 - Persistent state via **Railway Volume** (so config/credentials/memory survive redeploys)
 
 ## How it works (high level)
 
 - The container runs a wrapper web server.
 - The wrapper protects `/setup` with `SETUP_PASSWORD`.
-- During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
+- During setup, the wrapper runs `openclaw onboard ...` inside the container, writes state to the volume, and then starts the gateway. API-key providers use non-interactive setup. Interactive device-code logins (ChatGPT/Codex, xAI/Grok) can't run from the web wizard — complete those by running `openclaw wizard` in the Railway console.
 - After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
 
 ## Getting chat tokens (so you don't have to scramble)
+
+### ChatGPT / OpenAI Codex and Grok / xAI subscription login
+
+These providers use an interactive device-code login that the web `/setup` wizard can't drive. Complete them from the Railway console instead:
+
+1. Open your service in Railway and launch the **console** (a shell inside the running container).
+2. Run `openclaw wizard` and follow the prompts. Choose the ChatGPT/Codex or xAI/Grok device login, open the URL it prints in your browser, and enter the short code.
+3. Once the wizard finishes saving the OAuth profile, return to `/setup` — the instance will be configured and the gateway will start.
+
+This lets you use a ChatGPT/Codex account or an eligible SuperGrok / X Premium subscription without pasting an API key.
 
 ### Telegram bot token
 
@@ -37,36 +46,6 @@
 4. Copy the **Bot Token** and paste it into `/setup`
 5. Invite the bot to your server (OAuth2 URL Generator → scopes: `bot`, `applications.commands`; then choose permissions)
 
-## Web Terminal (TUI)
-
-The template includes an optional web-based terminal that runs `openclaw tui` in your browser.
-
-### Enabling
-
-Set `ENABLE_WEB_TUI=true` in your Railway Variables. The terminal is **disabled by default**.
-
-Once enabled, access it at `/tui` or via the "Open Terminal" button on the setup page.
-
-### Security
-
-The web TUI implements multiple security layers:
-
-| Control | Description |
-|---------|-------------|
-| **Opt-in only** | Disabled by default, requires explicit `ENABLE_WEB_TUI=true` |
-| **Password protected** | Uses the same `SETUP_PASSWORD` as the setup wizard |
-| **Single session** | Only 1 concurrent TUI session allowed at a time |
-| **Idle timeout** | Auto-closes after 5 minutes of inactivity (configurable via `TUI_IDLE_TIMEOUT_MS`) |
-| **Max duration** | Hard limit of 30 minutes per session (configurable via `TUI_MAX_SESSION_MS`) |
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENABLE_WEB_TUI` | `false` | Set to `true` to enable |
-| `TUI_IDLE_TIMEOUT_MS` | `300000` (5 min) | Closes session after inactivity |
-| `TUI_MAX_SESSION_MS` | `1800000` (30 min) | Maximum session duration |
-
 ## Local testing
 
 ```bash
@@ -75,14 +54,12 @@ docker build -t openclaw-railway-template .
 docker run --rm -p 8080:8080 \
   -e PORT=8080 \
   -e SETUP_PASSWORD=test \
-  -e ENABLE_WEB_TUI=true \
   -e OPENCLAW_STATE_DIR=/data/.openclaw \
   -e OPENCLAW_WORKSPACE_DIR=/data/workspace \
   -v $(pwd)/.tmpdata:/data \
   openclaw-railway-template
 
 # Setup wizard: http://localhost:8080/setup (password: test)
-# Web terminal: http://localhost:8080/tui (after setup)
 ```
 
 ## FAQ
@@ -95,10 +72,6 @@ A: Go to `/setup` on your deployed instance. When prompted for credentials, use 
 
 A: Go back to `/setup` and click the "Open OpenClaw UI" button from there. The setup page passes the required auth token to the UI. Accessing the UI directly without the token will cause connection errors.
 
-**Q: I don't see the TUI option on the setup page.**
-
-A: Make sure `ENABLE_WEB_TUI=true` is set in your Railway Variables and redeploy. The web terminal is disabled by default.
-
 **Q: How do I approve pairing for Telegram or Discord?**
 
 A: Go to `/setup` and use the "Approve Pairing" dialog to approve pending pairing requests from your chat channels.
@@ -109,7 +82,7 @@ A: New browsers/devices need a one-time approval from the gateway. Go to `/setup
 
 **Q: How do I change the AI model after setup?**
 
-A: Use the OpenClaw CLI to switch models. Access the web terminal at `/tui` (if enabled) or SSH into your container and run:
+A: Use the OpenClaw CLI to switch models. Railway provides an integrated in-browser shell directly in your dashboard — no external SSH client needed. Open the Railway dashboard, click your service, go to the **Console** tab, and use the connected shell to run:
 
 ```bash
 openclaw models set provider/model-id
@@ -123,17 +96,13 @@ A: Visit `/setup` on your deployed instance at any time — it works both before
 
 **Q: My config seems broken or I'm getting strange errors. How do I fix it?**
 
-A: Go to `/setup` and click the "Run Doctor" button. This runs `openclaw doctor --repair` which performs health checks on your gateway and channels, creates a backup of your config, and removes any unrecognized or corrupted configuration keys.
+A: Go to `/setup` and click the "Run Doctor" button. This runs `openclaw doctor --fix` which performs health checks on your gateway and channels, creates a backup of your config, and removes any unrecognized or corrupted configuration keys.
 
 ## Screenshots
 
 ## Setup
 
 <img width="2110" height="2032" alt="CleanShot 2026-02-23 at 21 57 59@2x" src="https://github.com/user-attachments/assets/28640eec-fa35-42f2-ba56-cb1fbb9525de" />
-
-## TUI
-
-<img width="2510" height="608" alt="CleanShot 2026-02-23 at 22 08 20@2x" src="https://github.com/user-attachments/assets/61147ec2-ddd5-4b5b-b9ac-0dd81a1ae4c7" />
 
 ## Device approval
 

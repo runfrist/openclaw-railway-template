@@ -10,9 +10,16 @@ services:
   - name: web
     type: web
     port: 8080
-    cpuCores: 0.5
-    ramMegabytes: 1024
+    cpuCores: 4
+    ramMegabytes: 8192
     instances: 1
+    terminationGracePeriodSeconds: 30
+    domains:
+      - name: web-15002-6b362a46-5h37bm0p.onporter.run
+    connections:
+      - type: disk
+        config:
+          diskName: openclaw-larry-data
     healthCheck:
       httpPath: /setup/healthz
       timeoutSeconds: 5
