@@ -1828,6 +1828,35 @@ app.use(async (req, res) => {
   return proxy.web(req, res, { target: GATEWAY_TARGET });
 });
 
+async function recoverStaleCrossPodLock() {
+  try {
+    const info = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["gateway", "recover-lock", "--json"]),
+    );
+    const match = stripAnsi(info.output || "").match(/\{[\s\S]*\}/);
+    if (!match) return;
+    const parsed = JSON.parse(match[0]);
+    if (!parsed?.present || !parsed?.confirmation) return;
+    const holders = Array.isArray(parsed.holders) ? parsed.holders : [];
+    const myHost = os.hostname();
+    const foreignOnly =
+      holders.length > 0 && holders.every((h) => !String(h).includes(myHost));
+    if (!foreignOnly) return;
+    log.warn(
+      "wrapper",
+      `recovering stale gateway lock from previous pod (host!=${myHost})...`,
+    );
+    const res = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["gateway", "recover-lock", "--confirm", parsed.confirmation]),
+    );
+    log.info("wrapper", `recover-lock exit=${res.code}`);
+  } catch (err) {
+    log.warn("wrapper", `recover-lock check failed: ${err.message}`);
+  }
+}
+
 const server = app.listen(PORT, () => {
   log.info("wrapper", `listening on port ${PORT}`);
   log.info("wrapper", `setup wizard: http://localhost:${PORT}/setup`);
@@ -1836,13 +1865,19 @@ const server = app.listen(PORT, () => {
 
   if (isConfigured()) {
     (async () => {
-      try {
-        log.info("wrapper", "running openclaw doctor --fix...");
-        const dr = await runCmd(OPENCLAW_NODE, clawArgs(["doctor", "--fix"]));
-        log.info("wrapper", `doctor --fix exit=${dr.code}`);
-        if (dr.output) log.info("wrapper", dr.output);
-      } catch (err) {
-        log.warn("wrapper", `doctor --fix failed: ${err.message}`);
+      await recoverStaleCrossPodLock();
+      if (process.env.RUN_DOCTOR_ON_BOOT === "1") {
+        try {
+          log.info("wrapper", "running openclaw doctor --non-interactive --fix...");
+          const dr = await runCmd(
+            OPENCLAW_NODE,
+            clawArgs(["doctor", "--non-interactive", "--fix"]),
+          );
+          log.info("wrapper", `doctor --fix exit=${dr.code}`);
+          if (dr.output) log.info("wrapper", dr.output);
+        } catch (err) {
+          log.warn("wrapper", `doctor --fix failed: ${err.message}`);
+        }
       }
       await ensureGatewayRunning();
     })().catch((err) => {
